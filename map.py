@@ -16,12 +16,11 @@ logger = logging.getLogger(__name__)
 # Initialize Earth Engine using service account credentials from st.secrets
 try:
     # Get Earth Engine credentials from secrets.toml
-    credentials_dict = st.secrets["earthengine"]
-    
-    # Initialize EE with ServiceAccountCredentials directly from secrets
+    credentials_json_str = st.secrets["earthengine"]  # This is a JSON string
+    credentials_dict = json.loads(credentials_json_str)  # Convert to dict
+
     service_account = credentials_dict["client_email"]
-    private_key = credentials_dict["private_key"]
-    credentials = ee.ServiceAccountCredentials(service_account, key_data=private_key)
+    credentials = ee.ServiceAccountCredentials(service_account, key_data=json.dumps(credentials_dict))
     ee.Initialize(credentials)
     logger.info("Earth Engine initialized successfully.")
 except Exception as e:
@@ -46,15 +45,14 @@ with col2:
     st.subheader("Future Date Range")
     min_date = datetime.date(2025, 1, 1)
     max_date = datetime.date(2100, 12, 31)
-    start_date = st.date_input("Start Date", value=datetime.date(2025, 1, 1), min_value=min_date, max_value=max_date)
+    start_date = st.date_input("Start Date", value=min_date, min_value=min_date, max_value=max_date)
     end_date = st.date_input("End Date", value=datetime.date(2025, 12, 31), min_value=min_date, max_value=max_date)
     
-    # Model and scenario selection
     models = ['ACCESS-CM2', 'CanESM5', 'GFDL-CM4', 'GISS-E2-1-G']  # Example models
-    scenarios = ['ssp245', 'ssp585']  # Future scenarios only
+    scenarios = ['ssp245', 'ssp585']
     selected_model = st.selectbox("Select Model", models, index=0)
     selected_scenario = st.selectbox("Select Scenario", scenarios, index=0)
-    
+
     # Display selected coordinates
     lat = None
     lon = None
@@ -83,7 +81,6 @@ if st.button("Fetch Climate Data"):
                 .filter(ee.Filter.eq('scenario', selected_scenario)) \
                 .filterBounds(point)
 
-            # Get list of images
             image_list = dataset.toList(delta_days + 1)
             dates = []
             precip_values = []
@@ -98,20 +95,18 @@ if st.button("Fetch Climate Data"):
                     data = img.reduceRegion(
                         reducer=ee.Reducer.first(),
                         geometry=point,
-                        scale=25000  # NEX-GDDP resolution (~25 km)
+                        scale=25000
                     ).getInfo()
-                    
+
                     precip = data.get('pr')
                     tasmin = data.get('tasmin')
                     tasmax = data.get('tasmax')
-                    
+
                     if all(v is not None for v in [precip, tasmin, tasmax]):
-                        # Convert precipitation from kg/m^2/s to mm/day
-                        precip_mm = float(precip) * 86400  # 86400 seconds in a day
-                        # Convert temperatures from Kelvin to Celsius
+                        precip_mm = float(precip) * 86400
                         tasmin_c = float(tasmin) - 273.15
                         tasmax_c = float(tasmax) - 273.15
-                        
+
                         dates.append(str(day))
                         precip_values.append(precip_mm)
                         tasmin_values.append(tasmin_c)
@@ -128,9 +123,8 @@ if st.button("Fetch Climate Data"):
                     logger.debug(f"Error processing data for {day}: {e}")
                     continue
 
-            if dates and precip_values and tasmin_values and tasmax_values:
-                # Create three Plotly figures
-                # Precipitation
+            if dates:
+                # Plotly: Precipitation
                 fig_precip = go.Figure()
                 fig_precip.add_trace(go.Scatter(x=dates, y=precip_values, mode='lines+markers', name='Precipitation'))
                 fig_precip.update_layout(
@@ -139,8 +133,8 @@ if st.button("Fetch Climate Data"):
                     yaxis_title="Precipitation (mm/day)",
                     template="plotly_white"
                 )
-                
-                # Minimum Temperature
+
+                # Plotly: Min Temp
                 fig_tasmin = go.Figure()
                 fig_tasmin.add_trace(go.Scatter(x=dates, y=tasmin_values, mode='lines+markers', name='Min Temperature'))
                 fig_tasmin.update_layout(
@@ -149,8 +143,8 @@ if st.button("Fetch Climate Data"):
                     yaxis_title="Temperature (°C)",
                     template="plotly_white"
                 )
-                
-                # Maximum Temperature
+
+                # Plotly: Max Temp
                 fig_tasmax = go.Figure()
                 fig_tasmax.add_trace(go.Scatter(x=dates, y=tasmax_values, mode='lines+markers', name='Max Temperature'))
                 fig_tasmax.update_layout(
@@ -165,7 +159,7 @@ if st.button("Fetch Climate Data"):
                 st.plotly_chart(fig_tasmin)
                 st.plotly_chart(fig_tasmax)
 
-                # Generate CSV for download
+                # Download CSV
                 output = StringIO()
                 writer = csv.DictWriter(output, fieldnames=['date', 'precipitation_mm', 'min_temperature_c', 'max_temperature_c'])
                 writer.writeheader()
