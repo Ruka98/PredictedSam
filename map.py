@@ -15,19 +15,13 @@ logger = logging.getLogger(__name__)
 
 # Initialize Earth Engine using service account credentials from st.secrets
 try:
-    # Get Earth Engine credentials dict from secrets.toml
+    # Get Earth Engine credentials from secrets.toml
     credentials_dict = st.secrets["earthengine"]
     
-    # Convert dict to JSON string
-    credentials_json = json.dumps(credentials_dict)
-    
-    # Write JSON credentials to a temporary file
-    with open("temp-key.json", "w") as f:
-        f.write(credentials_json)
-    
-    # Initialize EE with ServiceAccountCredentials
+    # Initialize EE with ServiceAccountCredentials directly from secrets
     service_account = credentials_dict["client_email"]
-    credentials = ee.ServiceAccountCredentials(service_account, "temp-key.json")
+    private_key = credentials_dict["private_key"]
+    credentials = ee.ServiceAccountCredentials(service_account, key_data=private_key)
     ee.Initialize(credentials)
     logger.info("Earth Engine initialized successfully.")
 except Exception as e:
