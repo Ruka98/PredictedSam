@@ -13,22 +13,26 @@ from streamlit_folium import st_folium
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
-# Initialize Earth Engine using service account
+# Initialize Earth Engine using service account credentials from st.secrets
 try:
-    service_account_file = 'elated-bus-441603-v9-ed9a63195dba.json'  # Replace with your actual JSON filename
-    with open(service_account_file) as f:
-        service_account_info = json.load(f)
-
-    credentials = ee.ServiceAccountCredentials(
-        service_account_info['client_email'],
-        key_data=json.dumps(service_account_info)
-    )
+    # Get Earth Engine credentials dict from secrets.toml
+    credentials_dict = st.secrets["earthengine"]
+    
+    # Convert dict to JSON string
+    credentials_json = json.dumps(credentials_dict)
+    
+    # Write JSON credentials to a temporary file
+    with open("temp-key.json", "w") as f:
+        f.write(credentials_json)
+    
+    # Initialize EE with ServiceAccountCredentials
+    service_account = credentials_dict["client_email"]
+    credentials = ee.ServiceAccountCredentials(service_account, "temp-key.json")
     ee.Initialize(credentials)
-    logger.info("Earth Engine initialized with service account")
+    logger.info("Earth Engine initialized successfully.")
 except Exception as e:
+    st.error(f"Earth Engine initialization failed: {e}")
     logger.error(f"Earth Engine initialization failed: {e}")
-    st.error(f"Failed to initialize Earth Engine: {e}")
-    st.stop()
 
 # Streamlit app layout
 st.title("NEX-GDDP-CMIP6 Future Climate Projections Explorer")
