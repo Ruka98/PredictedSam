@@ -19,17 +19,25 @@ logger = logging.getLogger(__name__)
 try:
     # Get Earth Engine credentials dict from secrets.toml
     credentials_dict = st.secrets["earthengine"]
+    logger.debug(f"Raw credentials: {credentials_dict}")
     
-    # Convert dict to JSON string
-    credentials_json = json.dumps(credentials_dict)
+    # Handle case where credentials_dict is a string or nested
+    if isinstance(credentials_dict, str):
+        credentials_dict = json.loads(credentials_dict)
+    elif isinstance(credentials_dict, dict) and "credentials" in credentials_dict:
+        credentials_dict = credentials_dict["credentials"]
+        if isinstance(credentials_dict, str):
+            credentials_dict = json.loads(credentials_dict)
     
-    # Write JSON credentials to a temporary file
-    with open("temp-key.json", "w") as f:
-        f.write(credentials_json)
+    # Ensure required fields exist
+    required_fields = ["client_email", "private_key"]
+    for field in required_fields:
+        if field not in credentials_dict:
+            raise KeyError(f"{field} not found in credentials. Check secrets.toml.")
     
     # Initialize EE with ServiceAccountCredentials
     service_account = credentials_dict["client_email"]
-    credentials = ee.ServiceAccountCredentials(service_account, "temp-key.json")
+    credentials = ee.ServiceAccountCredentials(service_account, key_data=credentials_dict)
     ee.Initialize(credentials)
     logger.info("Earth Engine initialized successfully.")
 except Exception as e:
