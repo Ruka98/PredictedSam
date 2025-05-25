@@ -35,9 +35,13 @@ try:
         if field not in credentials_dict:
             raise KeyError(f"{field} not found in credentials. Check secrets.toml.")
     
+    # Convert credentials_dict to JSON string for key_data
+    credentials_json = json.dumps(credentials_dict)
+    logger.debug(f"Credentials JSON: {credentials_json}")
+    
     # Initialize EE with ServiceAccountCredentials
     service_account = credentials_dict["client_email"]
-    credentials = ee.ServiceAccountCredentials(service_account, key_data=credentials_dict)
+    credentials = ee.ServiceAccountCredentials(service_account, key_data=credentials_json)
     ee.Initialize(credentials)
     logger.info("Earth Engine initialized successfully.")
 except Exception as e:
