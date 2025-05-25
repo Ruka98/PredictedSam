@@ -3,3 +3,5 @@ earthengine-api
 plotly
 folium
 streamlit-folium
+numpy
+pandas
