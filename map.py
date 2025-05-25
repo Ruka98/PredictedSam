@@ -8,6 +8,8 @@ from io import StringIO
 import plotly.graph_objects as go
 import folium
 from streamlit_folium import st_folium
+import pandas as pd
+import numpy as np
 
 # Set up logging
 logging.basicConfig(level=logging.DEBUG)
@@ -15,12 +17,19 @@ logger = logging.getLogger(__name__)
 
 # Initialize Earth Engine using service account credentials from st.secrets
 try:
-    # Get Earth Engine credentials from secrets.toml
-    credentials_json_str = st.secrets["earthengine"]  # This is a JSON string
-    credentials_dict = json.loads(credentials_json_str)  # Convert to dict
-
+    # Get Earth Engine credentials dict from secrets.toml
+    credentials_dict = st.secrets["earthengine"]
+    
+    # Convert dict to JSON string
+    credentials_json = json.dumps(credentials_dict)
+    
+    # Write JSON credentials to a temporary file
+    with open("temp-key.json", "w") as f:
+        f.write(credentials_json)
+    
+    # Initialize EE with ServiceAccountCredentials
     service_account = credentials_dict["client_email"]
-    credentials = ee.ServiceAccountCredentials(service_account, key_data=json.dumps(credentials_dict))
+    credentials = ee.ServiceAccountCredentials(service_account, "temp-key.json")
     ee.Initialize(credentials)
     logger.info("Earth Engine initialized successfully.")
 except Exception as e:
@@ -45,14 +54,15 @@ with col2:
     st.subheader("Future Date Range")
     min_date = datetime.date(2025, 1, 1)
     max_date = datetime.date(2100, 12, 31)
-    start_date = st.date_input("Start Date", value=min_date, min_value=min_date, max_value=max_date)
+    start_date = st.date_input("Start Date", value=datetime.date(2025, 1, 1), min_value=min_date, max_value=max_date)
     end_date = st.date_input("End Date", value=datetime.date(2025, 12, 31), min_value=min_date, max_value=max_date)
     
+    # Model and scenario selection
     models = ['ACCESS-CM2', 'CanESM5', 'GFDL-CM4', 'GISS-E2-1-G']  # Example models
-    scenarios = ['ssp245', 'ssp585']
+    scenarios = ['ssp245', 'ssp585']  # Future scenarios only
     selected_model = st.selectbox("Select Model", models, index=0)
     selected_scenario = st.selectbox("Select Scenario", scenarios, index=0)
-
+    
     # Display selected coordinates
     lat = None
     lon = None
@@ -73,7 +83,6 @@ if st.button("Fetch Climate Data"):
         st.error("End date cannot be after 2100.")
     else:
         try:
-            delta_days = (end_date - start_date).days
             point = ee.Geometry.Point([lon, lat])
             dataset = ee.ImageCollection('NASA/GDDP-CMIP6') \
                 .filterDate(str(start_date), str(end_date)) \
@@ -81,75 +90,115 @@ if st.button("Fetch Climate Data"):
                 .filter(ee.Filter.eq('scenario', selected_scenario)) \
                 .filterBounds(point)
 
-            image_list = dataset.toList(delta_days + 1)
-            dates = []
-            precip_values = []
-            tasmin_values = []
-            tasmax_values = []
-            csv_data = []
+            # Define a function to aggregate daily data to monthly
+            def aggregate_monthly(image):
+                date = ee.Date(image.get('system:time_start'))
+                year_month = date.format('YYYY-MM')
+                precip_sum = image.select('pr').multiply(86400)  # Convert kg/m^2/s to mm/day and sum
+                tasmin_mean = image.select('tasmin').subtract(273.15)  # Convert to Celsius
+                tasmax_mean = image.select('tasmax').subtract(273.15)  # Convert to Celsius
+                return ee.Image(image).set({
+                    'year_month': year_month,
+                    'precip_sum': precip_sum,
+                    'tasmin_mean': tasmin_mean,
+                    'tasmax_mean': tasmax_mean
+                })
 
-            for i in range(delta_days + 1):
-                day = start_date + datetime.timedelta(days=i)
-                try:
-                    img = ee.Image(image_list.get(i))
-                    data = img.reduceRegion(
-                        reducer=ee.Reducer.first(),
-                        geometry=point,
-                        scale=25000
-                    ).getInfo()
+            # Aggregate to monthly data
+            monthly_collection = dataset.map(aggregate_monthly).aggregate_array('year_month').distinct()
+            monthly_data_list = []
+            
+            for year_month in monthly_collection.getInfo():
+                month_start = datetime.datetime.strptime(year_month, '%Y-%m')
+                month_end = (month_start + datetime.timedelta(days=31)).replace(day=1) - datetime.timedelta(days=1)
+                
+                monthly_dataset = dataset.filterDate(
+                    ee.Date(year_month + '-01'),
+                    ee.Date(month_end.strftime('%Y-%m-%d')).advance(1, 'day')
+                )
+                
+                # Aggregate for the month
+                monthly_stats = monthly_dataset.reduce(ee.Reducer.sum().combine(
+                    reducer2=ee.Reducer.mean(),
+                    sharedInputs=True
+                ))
+                
+                data = monthly_stats.reduceRegion(
+                    reducer=ee.Reducer.first(),
+                    geometry=point,
+                    scale=25000  # NEX-GDDP resolution (~25 km)
+                ).getInfo()
+                
+                precip_sum = data.get('pr_sum')
+                tasmin_mean = data.get('tasmin_mean')
+                tasmax_mean = data.get('tasmax_mean')
+                
+                if all(v is not None for v in [precip_sum, tasmin_mean, tasmax_mean]):
+                    precip_mm = float(precip_sum) * 86400  # Convert to mm/month
+                    tasmin_c = float(tasmin_mean) - 273.15
+                    tasmax_c = float(tasmax_mean) - 273.15
+                    
+                    monthly_data_list.append({
+                        'date': year_month,
+                        'precipitation_mm': precip_mm,
+                        'min_temperature_c': tasmin_c,
+                        'max_temperature_c': tasmax_c
+                    })
 
-                    precip = data.get('pr')
-                    tasmin = data.get('tasmin')
-                    tasmax = data.get('tasmax')
+            if monthly_data_list:
+                # Convert to DataFrame
+                df = pd.DataFrame(monthly_data_list)
+                df['date'] = pd.to_datetime(df['date'])
+                df.set_index('date', inplace=True)
 
-                    if all(v is not None for v in [precip, tasmin, tasmax]):
-                        precip_mm = float(precip) * 86400
-                        tasmin_c = float(tasmin) - 273.15
-                        tasmax_c = float(tasmax) - 273.15
+                # Calculate flood and drought risks
+                df['flood_risk'] = df['precipitation_mm'].apply(
+                    lambda x: 'High' if x > 100 else 'Moderate' if x > 50 else 'Low'
+                )
+                df['drought_risk'] = df.apply(
+                    lambda row: 'High' if (row['precipitation_mm'] < 30 and row['max_temperature_c'] > 30) 
+                    else 'Moderate' if (row['precipitation_mm'] < 50 and row['max_temperature_c'] > 25) 
+                    else 'Low', axis=1
+                )
 
-                        dates.append(str(day))
-                        precip_values.append(precip_mm)
-                        tasmin_values.append(tasmin_c)
-                        tasmax_values.append(tasmax_c)
-                        csv_data.append({
-                            'date': str(day),
-                            'precipitation_mm': precip_mm,
-                            'min_temperature_c': tasmin_c,
-                            'max_temperature_c': tasmax_c
-                        })
-                    else:
-                        logger.debug(f"No data for {day}")
-                except ee.EEException as e:
-                    logger.debug(f"Error processing data for {day}: {e}")
-                    continue
-
-            if dates:
-                # Plotly: Precipitation
+                # Create Plotly figures for monthly data
                 fig_precip = go.Figure()
-                fig_precip.add_trace(go.Scatter(x=dates, y=precip_values, mode='lines+markers', name='Precipitation'))
+                fig_precip.add_trace(go.Bar(
+                    x=df.index.strftime('%Y-%m'),
+                    y=df['precipitation_mm'],
+                    name='Monthly Precipitation'
+                ))
                 fig_precip.update_layout(
-                    title="Daily Precipitation (Future Projection)",
-                    xaxis_title="Date",
-                    yaxis_title="Precipitation (mm/day)",
+                    title="Monthly Precipitation (Future Projection)",
+                    xaxis_title="Month",
+                    yaxis_title="Precipitation (mm/month)",
                     template="plotly_white"
                 )
 
-                # Plotly: Min Temp
                 fig_tasmin = go.Figure()
-                fig_tasmin.add_trace(go.Scatter(x=dates, y=tasmin_values, mode='lines+markers', name='Min Temperature'))
+                fig_tasmin.add_trace(go.Scatter(
+                    x=df.index.strftime('%Y-%m'),
+                    y=df['min_temperature_c'],
+                    mode='lines+markers',
+                    name='Min Temperature'
+                ))
                 fig_tasmin.update_layout(
-                    title="Daily Minimum Temperature (Future Projection)",
-                    xaxis_title="Date",
+                    title="Monthly Minimum Temperature (Future Projection)",
+                    xaxis_title="Month",
                     yaxis_title="Temperature (°C)",
                     template="plotly_white"
                 )
 
-                # Plotly: Max Temp
                 fig_tasmax = go.Figure()
-                fig_tasmax.add_trace(go.Scatter(x=dates, y=tasmax_values, mode='lines+markers', name='Max Temperature'))
+                fig_tasmax.add_trace(go.Scatter(
+                    x=df.index.strftime('%Y-%m'),
+                    y=df['max_temperature_c'],
+                    mode='lines+markers',
+                    name='Max Temperature'
+                ))
                 fig_tasmax.update_layout(
-                    title="Daily Maximum Temperature (Future Projection)",
-                    xaxis_title="Date",
+                    title="Monthly Maximum Temperature (Future Projection)",
+                    xaxis_title="Month",
                     yaxis_title="Temperature (°C)",
                     template="plotly_white"
                 )
@@ -159,21 +208,23 @@ if st.button("Fetch Climate Data"):
                 st.plotly_chart(fig_tasmin)
                 st.plotly_chart(fig_tasmax)
 
-                # Download CSV
+                # Display monthly data with risks
+                st.subheader("Monthly Climate Data and Risk Assessment")
+                st.dataframe(df)
+
+                # Generate CSV for download
                 output = StringIO()
-                writer = csv.DictWriter(output, fieldnames=['date', 'precipitation_mm', 'min_temperature_c', 'max_temperature_c'])
-                writer.writeheader()
-                writer.writerows(csv_data)
+                df.reset_index().to_csv(output, index=False)
                 csv_string = output.getvalue()
                 output.close()
 
                 st.download_button(
-                    label="Download CSV",
+                    label="Download Monthly CSV",
                     data=csv_string,
-                    file_name="climate_projections.csv",
+                    file_name="monthly_climate_projections.csv",
                     mime="text/csv"
                 )
-                logger.info(f"Displayed data: {len(dates)} days")
+                logger.info(f"Displayed data: {len(df)} months")
             else:
                 st.error("No data available for the selected location, date range, model, or scenario.")
         except Exception as e:
